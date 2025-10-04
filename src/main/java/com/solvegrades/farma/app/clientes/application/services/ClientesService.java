@@ -101,7 +101,7 @@ public class ClientesService {
             usuarioService.save(userDto);
         } catch (RuntimeException ex) {
             // si falla la creación del usuario, lanzar excepción para provocar rollback de la transacción
-            throw new RuntimeException("Error creando usuario asociado desde MAIN: " + ex.getMessage(), ex);
+            throw new RuntimeException("Error creando usuario asociado: " + ex.getMessage(), ex);
         }
 
         ClientesDTO res = toDTO(saved);
