@@ -11,8 +11,6 @@ import org.springframework.transaction.annotation.Transactional;
 import com.solvegrades.farma.app.clientes.application.dto.ClientesDTO;
 import com.solvegrades.farma.app.clientes.domain.entities.Clientes;
 import com.solvegrades.farma.app.clientes.domain.repositories.IClientesRepository;
-import com.solvegrades.farma.app.usuarios.application.dto.UsuarioDTO;
-import com.solvegrades.farma.app.usuarios.application.services.UsuarioService;
 
 @Service
 @Transactional
@@ -20,10 +18,6 @@ public class ClientesService {
 
     @Autowired
     private IClientesRepository clientesRepository;
-
-    // servicio de usuarios existente (se usará para crear usuario asociado)
-    @Autowired
-    private UsuarioService usuarioService;
 
     @Transactional(readOnly = true)
     public List<ClientesDTO> findAll() {
@@ -49,13 +43,13 @@ public class ClientesService {
     }
 
     /**
-     * Guarda cliente y crea su usuario asociado.
-     * Nota: guarda contraseña en texto plano (modo learning). En producción usar hash.
+     * Guarda un cliente.
+     * No se encarga de crear el usuario, solo maneja la creación del cliente.
      */
     public ClientesDTO save(ClientesDTO dto) {
         validateCliente(dto);
 
-        // unicidad por DNI y por nombre
+        // Verifica unicidad por DNI
         if (dto.getDni() != null && clientesRepository.existsByDni(dto.getDni())) {
             throw new RuntimeException("Ya existe un cliente con el DNI: " + dto.getDni());
         }
@@ -65,60 +59,35 @@ public class ClientesService {
         }
 
         Clientes cliente = toEntity(dto);
-        // si la contraseña viene en DTO, la guardamos tal cual
-        if (dto.getPassword() != null && !dto.getPassword().trim().isEmpty()) {
-            cliente.setPassword(dto.getPassword().trim());
-        }
-
+        
+        // Guardar cliente en la base de datos
         Clientes saved;
         try {
             saved = clientesRepository.save(cliente);
         } catch (DataIntegrityViolationException ex) {
-            // puede ocurrir si DB tiene unique constraints y hubo condición de carrera
             throw new RuntimeException("Error de integridad en la base de datos al crear cliente: " + ex.getMessage(), ex);
         }
 
-        // crear usuario asociado
-        try {
-            // SUGERENCIA: usar DNI como username (más estable y único). Si prefieres usar nombre, cambia aquí.
-            String usernameCandidate = saved.getDni(); // recomendado: DNI único y sin espacios
-            if (usernameCandidate == null || usernameCandidate.trim().isEmpty()) {
-                usernameCandidate = saved.getNombre() != null ? saved.getNombre().trim().replaceAll("\\s+"," ") : "user";
-            }
-
-            // si ya existe username en usuarios, anexar id
-            if (usuarioService.findByUsername(usernameCandidate) != null) {
-                usernameCandidate = usernameCandidate + "_" + saved.getId();
-            }
-
-            UsuarioDTO userDto = new UsuarioDTO();
-            userDto.setId(null);
-            userDto.setUsername(usernameCandidate);
-            userDto.setPassword(saved.getPassword()); // texto plano por ahora
-            userDto.setRole("CLIENTE");
-            userDto.setClienteId(saved.getId());
-
-            usuarioService.save(userDto);
-        } catch (RuntimeException ex) {
-            // si falla la creación del usuario, lanzar excepción para provocar rollback de la transacción
-            throw new RuntimeException("Error creando usuario asociado: " + ex.getMessage(), ex);
-        }
-
+        // Retornar el DTO sin la contraseña
         ClientesDTO res = toDTO(saved);
-        res.setPassword(null); // no devolver password en la respuesta
+        res.setPassword(null); // No devolver contraseña en la respuesta
         return res;
     }
 
     public ClientesDTO update(Integer id, ClientesDTO dto) {
         validateCliente(dto);
+
+        // Buscar cliente existente
         Clientes existing = clientesRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Cliente no encontrado con id: " + id));
+
+        // Verificar unicidad del nombre
         Optional<Clientes> clienteConMismoNombre = clientesRepository.findByNombre(dto.getNombre());
         if (clienteConMismoNombre.isPresent() && !clienteConMismoNombre.get().getId().equals(id)) {
             throw new RuntimeException("Ya existe otro cliente con el nombre: " + dto.getNombre());
         }
 
-        // validar dni: si lo cambian, revisar unicidad
+        // Validar y actualizar DNI si es necesario
         if (dto.getDni() != null && !dto.getDni().equals(existing.getDni())) {
             if (clientesRepository.existsByDni(dto.getDni())) {
                 throw new RuntimeException("Ya existe otro cliente con el DNI: " + dto.getDni());
@@ -126,20 +95,19 @@ public class ClientesService {
             existing.setDni(dto.getDni().trim());
         }
 
+        // Actualizar otros campos
         existing.setNombre(dto.getNombre());
         existing.setTelefono(dto.getTelefono());
 
-        // actualizar contraseña si viene: actualizar también el usuario vinculado (si existe)
+        // Actualizar contraseña si se proporciona
         if (dto.getPassword() != null && !dto.getPassword().trim().isEmpty()) {
-            existing.setPassword(dto.getPassword().trim()); // texto plano (learning)
-            try {
-                usuarioService.updatePasswordByClienteId(existing.getId(), dto.getPassword().trim());
-            } catch (Exception e) {
-                // registrar o ignorar si no existe usuario asociado; no romper la operación
-            }
+            existing.setPassword(dto.getPassword().trim());
         }
 
+        // Guardar cliente actualizado
         Clientes updated = clientesRepository.save(existing);
+        
+        // Retornar el DTO sin la contraseña
         ClientesDTO res = toDTO(updated);
         res.setPassword(null);
         return res;
@@ -149,12 +117,7 @@ public class ClientesService {
         if (!clientesRepository.existsById(id)) {
             throw new RuntimeException("Cliente no encontrado con id: " + id);
         }
-        // eliminar usuario asociado si existe
-        try {
-            usuarioService.deleteByClienteId(id);
-        } catch (Exception e) {
-            // ignorar si no existe o el método no está implementado
-        }
+        // Eliminar cliente
         clientesRepository.deleteById(id);
     }
 
@@ -174,7 +137,7 @@ public class ClientesService {
         if (dto.getDni().length() > 20) {
             throw new IllegalArgumentException("El DNI no puede exceder 20 caracteres");
         }
-        // contraseña requerida únicamente al crear un cliente
+        // Contraseña requerida solo al crear cliente
         if (dto.getId() == null) {
             if (dto.getPassword() == null || dto.getPassword().trim().isEmpty()) {
                 throw new IllegalArgumentException("La contraseña es obligatoria al registrar un cliente");
